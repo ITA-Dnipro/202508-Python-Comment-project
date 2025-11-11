@@ -1,9 +1,6 @@
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 from app.database import comments_collection
-from bson import ObjectId
-from datetime import datetime, timezone
-import json
-import asyncio
+
 import aioredis
 
 class ConnectionManager:
@@ -22,12 +19,3 @@ class ConnectionManager:
             await ws.send_json(message)
 
 manager = ConnectionManager()
-
-@router.websocket("/ws/projects/{project_id}/comments")
-async def websocket_endpoint(websocket: WebSocket, project_id: int):
-    await manager.connect(websocket, project_id)
-    try:
-        while True:
-            await asyncio.sleep(30)
-    except WebSocketDisconnect:
-        await manager.disconnect(websocket, project_id)
