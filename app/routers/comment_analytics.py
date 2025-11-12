@@ -77,7 +77,7 @@ async def get_global_comment_analytics(http_user_id: int = Header(None, alias="u
 
     # Fetch all startup's projects
     async with httpx.AsyncClient() as client:
-        # ToDo: smplement this endpoint in monolith(get startup projects from current startuper)
+        # ToDo: implement this endpoint in monolith(get startup projects from current startuper)
         # now endpoint returns all projects
         resp = await client.get(f"{PROJECTS_SERVICE_URL}/?owner={http_user_id}", headers={"Authorization": token})
         if resp.status_code != 200:
