@@ -1,9 +1,5 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from app.routers import comments
-import logging
-
-logger = logging.getLogger("headers_logger")
-logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Comments Microservice")
 
