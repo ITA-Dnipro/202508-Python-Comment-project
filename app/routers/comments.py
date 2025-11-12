@@ -218,6 +218,7 @@ async def edit_comment(
         raise HTTPException(status_code=404, detail="Comment not found")
 
     if int(comment["author_id"]) != http_user_id:
+        logger.info(f"User {http_user_id} is not allowed to edit comment {comment_id} Author: {comment['author_id']}")
         raise HTTPException(status_code=403, detail="Not allowed to edit this comment")
 
     new_text = updated_data.get("text")
