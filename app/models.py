@@ -7,8 +7,9 @@ class CommentModel(BaseModel):
     project_id: int
     author_id: int
     text: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+    edited: bool = False
     is_deleted: bool = False
 
     class Config:
