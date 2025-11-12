@@ -271,6 +271,7 @@ async def delete_comment(
     if int(comment["author_id"]) != http_user_id:
         raise HTTPException(status_code=403, detail="Not allowed to delete this comment")
 
+    # Soft-delete
     await comments_collection.update_one(
         {"_id": ObjectId(comment_id)},
         {"$set": {"is_deleted": True, "updated_at": datetime.now(timezone.utc)}},
@@ -280,13 +281,22 @@ async def delete_comment(
     redis = await get_redis()
     await redis.delete(f"comments:project:{comment['project_id']}")
 
-    # optional: broadcast deletion
-    await broadcast_comment(
-        comment["project_id"],
-        CommentModel(**{**comment, "is_deleted": True})
-    )
+    # Підготувати безпечну копію для WebSocket broadcast
+    safe_comment = dict(comment)
+    safe_comment["_id"] = str(safe_comment["_id"])
+    safe_comment["is_deleted"] = True
+
+    # Broadcast updating
+    try:
+        await broadcast_comment(
+            safe_comment["project_id"],
+            CommentModel(**safe_comment),
+        )
+    except Exception as e:
+        logger.warning(f"WebSocket broadcast failed: {e}")
 
     return None
+
 
 
 # -------------------------------------------------------
