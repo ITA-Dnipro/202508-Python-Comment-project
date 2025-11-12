@@ -13,10 +13,3 @@ app.include_router(comments.router, prefix="/api", tags=["comments"])
 async def root():
     return {"message": "Comments service is running"}
 
-
-@app.middleware("http")
-async def log_request_headers(request: Request, call_next):
-    headers_dict = dict(request.headers)
-    logger.info(f"📦 Incoming headers: {headers_dict}")
-    response = await call_next(request)
-    return response
