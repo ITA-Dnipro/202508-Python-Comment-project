@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from app.routers import comments
 
 app = FastAPI(title="Comments Microservice")
