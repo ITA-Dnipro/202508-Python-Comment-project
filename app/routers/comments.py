@@ -4,7 +4,6 @@ import json
 from datetime import datetime, timezone
 from bson import ObjectId
 
-
 import httpx
 import aioredis
 from pymongo import ASCENDING
@@ -29,7 +28,8 @@ from app.tasks import notify_project_owner, publish_event
 PROJECTS_SERVICE_URL = os.getenv(
     "PROJECTS_SERVICE_URL", "http://web:8000/api/projects/startup-projects"
 )
-USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://web:8000/api/users")
+USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://web:8000/api/users") # === for the future updates
+NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://web:8000/notifications/")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 CACHE_TTL = 300  # seconds
 
@@ -56,19 +56,21 @@ async def create_comment(
 ):
     """
     Add a comment to a project.
-    Headers: HTTP_USER_ID, HTTP_ROLE
+    Headers: user-id, role
     Body: {"text": "..."}
     """
 
     if not http_user_id or not http_role:
-        logger.warning(f"Missing auth headers: HTTP_USER_ID={http_user_id}, HTTP_ROLE={http_role}")
+        logger.warning(f"Missing auth headers: user-id={http_user_id}, role={http_role}")
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = request.headers.get("Authorization")
 
     # --- Verify project existence via main API ---
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{PROJECTS_SERVICE_URL}/{project_id}/",
-            headers={"Authorization": request.headers.get("Authorization")},
+            headers={"Authorization": token},
             timeout=5.0,
         )
 
@@ -104,6 +106,31 @@ async def create_comment(
         "user_id": http_user_id,
         "comment_id": str(result.inserted_id),
     })
+
+    # --- Send notification to Notification Service ---
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            notif_payload = {
+                "message": comment.text,
+                "is_read": False,
+                "notification_type": 1,
+                "investor": 1, # temporarily, without investor ID comment can't be created
+                "startup": 1. # temporarily, without startup ID comment can't be created
+            }
+            notif_resp = await client.post(
+                NOTIFICATION_SERVICE_URL,
+                headers={"Authorization": token, "Content-Type": "application/json"},
+                json=notif_payload,
+            )
+
+            if notif_resp.status_code == 403:
+                logger.info("Notification service returned 403 — likely sender is a startup, ignoring.")
+            elif notif_resp.status_code >= 400:
+                logger.warning(f"Notification service returned error {notif_resp.status_code}: {notif_resp.text}")
+            else:
+                logger.info(f"Notification successfully sent to {NOTIFICATION_SERVICE_URL}")
+    except Exception as e:
+        logger.error(f"Failed to send notification: {e}")
 
     # --- Broadcast via WebSocket (real-time updates) ---
     await broadcast_comment(project_id, comment_obj)
@@ -144,7 +171,7 @@ async def list_project_comments(
     for c in comments:
         author_info = {"name": "Unknown", "avatar": None}
         try:
-            response = await session.get(f"{USER_SERVICE_URL}/{c['author_id']}/")
+            response = await session.get(f"{USER_SERVICE_URL}/{c['author_id']}/") # === for the future updates
             if response.status_code == 200:
                 j = response.json()
                 author_info = {
@@ -177,18 +204,12 @@ active_connections: dict[int, list[WebSocket]] = {}
 async def broadcast_comment(project_id: int, comment: CommentModel):
     """Send real-time updates to connected clients"""
     if project_id in active_connections:
-
         data_dict = comment.model_dump()
-
-        # serialize datetime → str
         for k, v in data_dict.items():
             if isinstance(v, datetime):
                 data_dict[k] = v.isoformat()
 
-        message = {
-            "event": "comment_created",
-            "data": data_dict,
-        }
+        message = {"event": "comment_created", "data": data_dict}
 
         for ws in active_connections[project_id]:
             await ws.send_json(message)
