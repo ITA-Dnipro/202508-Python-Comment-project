@@ -197,6 +197,98 @@ async def list_project_comments(
 
 
 # -------------------------------------------------------
+# Edit Comment (PATCH)
+# -------------------------------------------------------
+@router.patch("/{comment_id}/", response_model=CommentRead)
+async def edit_comment(
+    comment_id: str,
+    updated_data: dict,
+    request: Request,
+    http_user_id: int = Header(None, alias="user-id"),
+):
+    """
+    Edit your own comment text.
+    Only author can edit their comment.
+    """
+    if not http_user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    comment = await comments_collection.find_one({"_id": ObjectId(comment_id)})
+    if not comment or comment.get("is_deleted"):
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if int(comment["author_id"]) != http_user_id:
+        raise HTTPException(status_code=403, detail="Not allowed to edit this comment")
+
+    new_text = updated_data.get("text")
+    if not new_text:
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    await comments_collection.update_one(
+        {"_id": ObjectId(comment_id)},
+        {
+            "$set": {
+                "text": new_text,
+                "updated_at": datetime.now(timezone.utc),
+                "edited": True,
+            }
+        },
+    )
+
+    # clear cache
+    redis = await get_redis()
+    await redis.delete(f"comments:project:{comment['project_id']}")
+
+    # reload
+    updated_comment = await comments_collection.find_one({"_id": ObjectId(comment_id)})
+    updated_comment["_id"] = str(updated_comment["_id"])
+
+    # broadcast websocket update
+    await broadcast_comment(comment["project_id"], CommentModel(**updated_comment))
+
+    return CommentModel(**updated_comment)
+
+
+# -------------------------------------------------------
+# Delete Comment (Soft Delete)
+# -------------------------------------------------------
+@router.delete("/{comment_id}/", status_code=204)
+async def delete_comment(
+    comment_id: str,
+    http_user_id: int = Header(None, alias="user-id"),
+):
+    """
+    Soft delete a comment. Only author can delete.
+    """
+    if not http_user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    comment = await comments_collection.find_one({"_id": ObjectId(comment_id)})
+    if not comment or comment.get("is_deleted"):
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if int(comment["author_id"]) != http_user_id:
+        raise HTTPException(status_code=403, detail="Not allowed to delete this comment")
+
+    await comments_collection.update_one(
+        {"_id": ObjectId(comment_id)},
+        {"$set": {"is_deleted": True, "updated_at": datetime.now(timezone.utc)}},
+    )
+
+    # clear cache
+    redis = await get_redis()
+    await redis.delete(f"comments:project:{comment['project_id']}")
+
+    # optional: broadcast deletion
+    await broadcast_comment(
+        comment["project_id"],
+        CommentModel(**{**comment, "is_deleted": True})
+    )
+
+    return None
+
+
+# -------------------------------------------------------
 # Real-time WebSocket Broadcast
 # -------------------------------------------------------
 active_connections: dict[int, list[WebSocket]] = {}
