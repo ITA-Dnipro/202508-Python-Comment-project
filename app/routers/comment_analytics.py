@@ -81,14 +81,17 @@ async def get_project_comment_analytics(project_id: int):
 # -------------------------------------------------------
 @router.get("/summary/")
 async def get_global_comment_analytics(
-    http_user_id: int = Header(..., alias="user-id"),
-    authorization: str = Header(..., alias="Authorization"),
+    http_user_id: int = Header(None, alias="user-id"),
+    authorization: str = Header(None, alias="Authorization"),
     client: httpx.AsyncClient = Depends(get_http_client),
 ):
     """
     Returns aggregated analytics for all projects owned by the startup user.
     """
     # Fetch startup projects
+    if not http_user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     resp = await client.get(
         f"{PROJECTS_SERVICE_URL}/?owner={http_user_id}",
         headers={"Authorization": authorization},

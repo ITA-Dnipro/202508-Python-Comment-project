@@ -1,11 +1,13 @@
-import logging
 import os
+import logging
 import json
-from datetime import datetime, timezone
-from bson import ObjectId
 import asyncio
+from datetime import datetime, timezone
+from typing import Optional
+from bson import ObjectId
 
 import httpx
+from pymongo import ASCENDING
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -15,25 +17,18 @@ from fastapi import (
     Query,
     WebSocket,
     WebSocketDisconnect,
-    Depends,
 )
-from pymongo import ASCENDING
 
 from app.database import comments_collection
 from app.schemas import CommentCreate, CommentRead
 from app.models import CommentModel
-from app.redis_client import get_redis
-from app.dependencies import get_http_client
 from app.tasks import notify_project_owner, publish_event
 
 
 # -------------------------------------------------------
 # CONFIG
 # -------------------------------------------------------
-PROJECTS_SERVICE_URL = os.getenv(
-    "PROJECTS_SERVICE_URL",
-    "http://web:8000/api/projects/startup-projects"
-)
+PROJECTS_SERVICE_URL = os.getenv("PROJECTS_SERVICE_URL", "http://web:8000/api/projects/startup-projects")
 USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://web:8000/api/users")
 NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://web:8000/api/notifications/")
 CACHE_TTL = 300
@@ -76,31 +71,27 @@ async def create_comment(
     request: Request,
     http_user_id: int = Header(None, alias="user-id"),
     http_role: str = Header(None, alias="role"),
-    client: httpx.AsyncClient = Depends(get_http_client),
 ):
-    """
-        Add a comment to a project.
-        Headers: user-id, role
-        Body: {"text": "..."}
-    """
-
     if not http_user_id or not http_role:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    client: httpx.AsyncClient = request.app.state.http_client
+    redis = request.app.state.redis
+
     token = request.headers.get("Authorization")
 
-    # Verify project
-    project_resp = await client.get(
+    # --- verify project ---
+    resp = await client.get(
         f"{PROJECTS_SERVICE_URL}/{project_id}/",
         headers={"Authorization": token},
     )
 
-    if project_resp.status_code == 404:
+    if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="Project not found")
-    if project_resp.status_code != 200:
+    if resp.status_code != 200:
         raise HTTPException(status_code=500, detail="Failed to verify project")
 
-    # Save comment
+    # --- save comment ---
     data = {
         "project_id": project_id,
         "author_id": http_user_id,
@@ -109,17 +100,16 @@ async def create_comment(
         "updated_at": datetime.now(timezone.utc),
         "is_deleted": False,
     }
+
     result = await comments_collection.insert_one(data)
     new_comment = await comments_collection.find_one({"_id": result.inserted_id})
-
     new_comment["_id"] = str(new_comment["_id"])
     comment_obj = CommentModel(**new_comment)
 
-    # Clear cache
-    redis = await get_redis()
+    # --- clear cache ---
     await redis.delete(f"comments:project:{project_id}")
 
-    # Background tasks
+    # --- background tasks ---
     notify_project_owner.delay(project_id, http_user_id, comment.text)
     publish_event.delay("comment_created", {
         "project_id": project_id,
@@ -127,31 +117,28 @@ async def create_comment(
         "comment_id": str(result.inserted_id),
     })
 
-    # Send notification to Notification Service
+    # --- notification service ---
     try:
         notif_payload = {
             "message": comment.text,
             "is_read": False,
             "notification_type": 1,
-            "investor": 1, # temporarily, without investor ID comment can't be created
-            "startup": 1, # temporarily, without startup ID comment can't be created
+            "investor": 1,
+            "startup": 1,
         }
-        notif_resp = await client.post(
+        notify_resp = await client.post(
             NOTIFICATION_SERVICE_URL,
             headers={"Authorization": token},
             json=notif_payload,
         )
-
-        if notif_resp.status_code == 403:
-            logger.info("Notification service returned 403 (ignored).")
-        elif notif_resp.status_code >= 400:
-            logger.warning(f"Notification service error {notif_resp.status_code}")
+        if notify_resp.status_code == 403:
+            logger.info("Notification 403 ignored")
     except Exception as e:
-        logger.error(f"Notification send failed: {e}")
+        logger.error(f"Notification failed: {e}")
 
     await broadcast_comment(project_id, comment_obj)
-
     return comment_obj
+
 
 
 # -------------------------------------------------------
@@ -160,17 +147,19 @@ async def create_comment(
 @router.get("/projects/{project_id}/", response_model=list[CommentRead])
 async def list_project_comments(
     project_id: int,
+    request: Request,
     page: int = Query(1, ge=1),
     limit: int = Query(10, le=100),
-    client: httpx.AsyncClient = Depends(get_http_client),
+
 ):
+    redis = request.app.state.redis
+    client: httpx.AsyncClient = request.app.state.http_client
+
     skip = (page - 1) * limit
-    redis = await get_redis()
     cache_key = f"comments:project:{project_id}:page:{page}"
 
     cached = await redis.get(cache_key)
     if cached:
-        logger.info(f"Cache hit: {cache_key}")
         return [CommentRead(**c) for c in json.loads(cached)]
 
     cursor = (
@@ -179,11 +168,11 @@ async def list_project_comments(
         .skip(skip)
         .limit(limit)
     )
+
     comments = await cursor.to_list(length=limit)
 
-    # Parallel author enrichment
     tasks = [
-        client.get(f"{USER_SERVICE_URL}/{c['author_id']}/", timeout=3.0)
+        client.get(f"{USER_SERVICE_URL}/{c['author_id']}/")
         for c in comments
     ]
     responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -217,6 +206,7 @@ async def list_project_comments(
 async def edit_comment(
     comment_id: str,
     updated_data: dict,
+    request: Request,
     http_user_id: int = Header(None, alias="user-id"),
 ):
     """
@@ -242,7 +232,7 @@ async def edit_comment(
         {"$set": {"text": new_text, "updated_at": datetime.now(timezone.utc), "edited": True}},
     )
 
-    redis = await get_redis()
+    redis = request.app.state.redis
     await redis.delete(f"comments:project:{comment['project_id']}")
 
     new_comment = await comments_collection.find_one({"_id": ObjectId(comment_id)})
@@ -260,6 +250,7 @@ async def edit_comment(
 @router.delete("/{comment_id}/", status_code=204)
 async def delete_comment(
     comment_id: str,
+    request: Request,
     http_user_id: int = Header(None, alias="user-id"),
 ):
     """
@@ -280,7 +271,7 @@ async def delete_comment(
         {"$set": {"is_deleted": True, "updated_at": datetime.now(timezone.utc)}},
     )
 
-    redis = await get_redis()
+    redis = request.app.state.redis
     await redis.delete(f"comments:project:{comment['project_id']}")
 
     safe_comment = dict(comment)
@@ -300,19 +291,18 @@ async def delete_comment(
 # -------------------------------------------------------
 @router.websocket("/ws/projects/{project_id}/comments")
 async def websocket_endpoint(websocket: WebSocket, project_id: int):
-    """WebSocket endpoint for live comment updates"""
     await websocket.accept()
+
     active_connections.setdefault(project_id, []).append(websocket)
 
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        try:
-            conns = active_connections.get(project_id)
-            if conns and websocket in conns:
-                conns.remove(websocket)
-            if conns and not conns:
-                del active_connections[project_id]
-        except Exception as e:
-            logger.warning(f"WebSocket disconnect error: {e}")
+        conns = active_connections.get(project_id, [])
+
+        if websocket in conns:
+            conns.remove(websocket)
+
+        if conns == []:
+            active_connections.pop(project_id, None)
