@@ -1,6 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorClient
-from app.core.config import settings
+from app.config import settings
 
-client = AsyncIOMotorClient(settings.MONGO_URI)
-db = client[settings.DB_NAME]
+client = AsyncIOMotorClient(settings.MONGO_URL)
+db = client[settings.MONGO_DB]
 comments_collection = db["comments"]

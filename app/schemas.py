@@ -1,24 +1,29 @@
+from pydantic import BaseModel, Field
 from datetime import datetime
-from pydantic import BaseModel, Field, field_validator
+from typing import Optional
 
 class CommentBase(BaseModel):
-    project_id: int
-    author_id: int
-    text: str = Field(..., max_length=500)
+    text: str = Field(..., min_length=1, max_length=2000)
 
-    @field_validator("text")
-    def validate_text(cls, v):
-        if len(v.strip()) < 3:
-            raise ValueError("Comment must contain at least 3 characters.")
-        if len(v) > 500:
-            raise ValueError("Comment exceeds 500 character limit.")
-        return v
 
 class CommentCreate(CommentBase):
     pass
 
+
 class CommentRead(CommentBase):
-    id: str
+    id: Optional[str]
+    project_id: int
+    author_id: int
+
     created_at: datetime
     updated_at: datetime
-    is_deleted: bool
+
+    # Optional UX fields
+    author_name: Optional[str] = None
+    author_avatar: Optional[str] = None
+
+    edited: Optional[bool] = False
+    is_deleted: bool = False
+
+    class Config:
+        from_attributes = True
