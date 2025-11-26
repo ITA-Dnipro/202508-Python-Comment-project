@@ -23,7 +23,7 @@ from app.database import comments_collection
 from app.schemas import CommentCreate, CommentRead
 from app.models import CommentModel
 from app.tasks import notify_project_owner, publish_event
-
+from app.services.rabbitmq_client import publish_notification_event
 
 # -------------------------------------------------------
 # CONFIG
@@ -91,6 +91,9 @@ async def create_comment(
     if resp.status_code != 200:
         raise HTTPException(status_code=500, detail="Failed to verify project")
 
+    project_data = resp.json()
+    project_owner_id = project_data.get("startup_profile_id")
+
     # --- save comment ---
     data = {
         "project_id": project_id,
@@ -117,24 +120,18 @@ async def create_comment(
         "comment_id": str(result.inserted_id),
     })
 
-    # --- notification service ---
+    # --- Publish notification event via RabbitMQ ---
     try:
-        notif_payload = {
+        publish_notification_event({
+            "event_type": "comment.created",
+            "recipient_id": project_owner_id,
+            "title": "New Comment on Your Project",
             "message": comment.text,
-            "is_read": False,
-            "notification_type": 1,
-            "investor": 1,
-            "startup": 1,
-        }
-        notify_resp = await client.post(
-            NOTIFICATION_SERVICE_URL,
-            headers={"Authorization": token},
-            json=notif_payload,
-        )
-        if notify_resp.status_code == 403:
-            logger.info("Notification 403 ignored")
+            "reference_id": project_id,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
     except Exception as e:
-        logger.error(f"Notification failed: {e}")
+        logger.error(f"Failed to publish notification event: {e}")
 
     await broadcast_comment(project_id, comment_obj)
     return comment_obj
@@ -192,7 +189,7 @@ async def list_project_comments(
 
     await redis.set(
         cache_key,
-        json.dumps([e.model_dump() for e in enriched]),
+        json.dumps([e.model_dump() for e in enriched], default=str),
         ex=CACHE_TTL,
     )
 
